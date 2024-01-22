@@ -133,7 +133,7 @@ parserHeader name =
     Parser.succeed ()
         |. Parser.chompWhile (\c -> c == '-')
         |. Parser.symbol "\n"
-        |. Parser.symbol name
+        |. Parser.keyword name
         |. Parser.symbol "\n"
         |. Parser.chompWhile (\c -> c == '-')
         |. Parser.symbol "\n"
@@ -217,10 +217,88 @@ parserProduction production =
 parserInfo : Parser Automaton
 parserInfo =
     Parser.succeed Automaton
+        |. parserMainHeader
+        |. parserConflicts
+        |. parserUnusedRules
         |= parserGrammar
         |. parserTerminals
         |. parserNonTerminals
         |= parserStates
+        |. parserGrammarTotals
+
+
+parserMainHeader : Parser ()
+parserMainHeader =
+    Parser.succeed ()
+        |. Parser.chompWhile (\c -> c == '-')
+        |. Parser.symbol "\n"
+        |. Parser.chompUntil "\n"
+        |. Parser.symbol "\n"
+        |. Parser.chompWhile (\c -> c == '-')
+        |. Parser.symbol "\n"
+        |. Parser.symbol "\n"
+
+
+parserConflicts : Parser ()
+parserConflicts =
+    let
+        parserConflictType =
+            Parser.oneOf
+                [ Parser.keyword "shift/reduce"
+                , Parser.keyword "reduce/reduce"
+                ]
+    in
+    Parser.loop ()
+        (\_ ->
+            Parser.oneOf
+                [ Parser.succeed (Loop ())
+                    |. Parser.keyword "state"
+                    |. Parser.spaces
+                    |. Parser.int
+                    |. Parser.spaces
+                    |. Parser.keyword "contains"
+                    |. Parser.spaces
+                    |. Parser.sequence
+                        { start = ""
+                        , separator = " and "
+                        , end = "."
+                        , spaces = Parser.succeed ()
+                        , item =
+                            Parser.succeed ()
+                                |. Parser.int
+                                |. Parser.spaces
+                                |. parserConflictType
+                                |. Parser.spaces
+                                |. Parser.keyword "conflicts"
+                        , trailing = Forbidden
+                        }
+                    |. Parser.symbol "\n"
+                , Parser.succeed (Done ())
+                    |. Parser.symbol "\n"
+                ]
+        )
+
+
+parserUnusedRules : Parser ()
+parserUnusedRules =
+    let
+        parserHelp =
+            Parser.oneOf
+                [ Parser.succeed (Loop ())
+                    |. Parser.keyword "rule"
+                    |. Parser.spaces
+                    |. Parser.int
+                    |. Parser.spaces
+                    |. Parser.keyword "is"
+                    |. Parser.spaces
+                    |. Parser.keyword "unused"
+                    |. Parser.symbol "\n"
+                , Parser.succeed (Done ())
+                ]
+    in
+    Parser.succeed ()
+        |. Parser.loop () (\_ -> parserHelp)
+        |. Parser.symbol "\n"
 
 
 parserGrammar : Parser (Dict Int Production)
@@ -354,17 +432,17 @@ parserLookahead =
                                 |= parserShiftReduceAction
                     )
            )
-        |= parserConflicts
+        |= parserRuleConflicts
 
 
-parserConflicts : Parser (List ShiftReduceAction)
-parserConflicts =
+parserRuleConflicts : Parser (List ShiftReduceAction)
+parserRuleConflicts =
     let
         parserHelp : List ShiftReduceAction -> Parser (Step (List ShiftReduceAction) (List ShiftReduceAction))
         parserHelp actions =
             Parser.oneOf
                 [ Parser.succeed (\action -> Loop (action :: actions))
-                    |= parserConflict
+                    |= parserRuleConflict
                 , Parser.succeed (Done (List.reverse actions))
                 ]
     in
@@ -380,8 +458,8 @@ parserConflicts =
             )
 
 
-parserConflict : Parser ShiftReduceAction
-parserConflict =
+parserRuleConflict : Parser ShiftReduceAction
+parserRuleConflict =
     Parser.succeed identity
         |. Parser.symbol "\n\t\t\t"
         |. Parser.symbol "("
@@ -436,6 +514,29 @@ parserGoto =
         |. Parser.keyword "state"
         |. Parser.spaces
         |= Parser.int
+
+
+parserGrammarTotals : Parser ()
+parserGrammarTotals =
+    let
+        parserGrammarTotalsLine category =
+            Parser.succeed ()
+                |. Parser.keyword "Number"
+                |. Parser.spaces
+                |. Parser.keyword "of"
+                |. Parser.spaces
+                |. Parser.keyword category
+                |. Parser.symbol ":"
+                |. Parser.spaces
+                |. Parser.int
+                |. Parser.symbol "\n"
+    in
+    Parser.succeed ()
+        |. parserHeader "Grammar Totals"
+        |. parserGrammarTotalsLine "rules"
+        |. parserGrammarTotalsLine "terminals"
+        |. parserGrammarTotalsLine "non-terminals"
+        |. parserGrammarTotalsLine "states"
 
 
 
