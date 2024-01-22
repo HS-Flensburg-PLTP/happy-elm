@@ -1,4 +1,4 @@
-module Stack exposing (Stack, empty, popN, push, size, toString)
+module Stack exposing (Stack, empty, isEmpty, pop, popN, push, size, toString)
 
 
 type Stack
@@ -12,12 +12,17 @@ toString (Stack entries) =
             "<empty>"
 
         _ ->
-            String.join " " entries
+            String.join " " (List.reverse entries)
 
 
 empty : Stack
 empty =
     Stack []
+
+
+isEmpty : Stack -> Bool
+isEmpty (Stack list) =
+    List.isEmpty list
 
 
 size : Stack -> Int
@@ -28,6 +33,16 @@ size (Stack list) =
 popN : Int -> Stack -> Stack
 popN n (Stack list) =
     Stack (List.drop n list)
+
+
+pop : Stack -> Maybe ( String, Stack )
+pop (Stack list) =
+    case list of
+        [] ->
+            Nothing
+
+        str :: rest ->
+            Just ( str, Stack rest )
 
 
 push : String -> Stack -> Stack

@@ -3,7 +3,7 @@ module Main exposing (main)
 import Browser
 import Dict exposing (Dict)
 import Html exposing (Html, button, div, table, td, text, textarea, th, tr)
-import Html.Attributes exposing (cols, list, placeholder, rows)
+import Html.Attributes exposing (cols, disabled, list, placeholder, rows)
 import Html.Events exposing (onClick, onInput)
 import Parser exposing ((|.), (|=), Parser, Step(..), Trailing(..))
 import Set
@@ -29,8 +29,13 @@ type RuleId
     = RuleId Int
 
 
-ruleToString : RuleId -> String
-ruleToString (RuleId no) =
+ruleIdToInt : RuleId -> Int
+ruleIdToInt (RuleId no) =
+    no
+
+
+ruleIdToString : RuleId -> String
+ruleIdToString (RuleId no) =
     String.fromInt no
 
 
@@ -41,33 +46,40 @@ type ShiftReduceAction
 
 
 type Action
-    = ShiftReduce ShiftReduceAction
+    = Shift StateId
+    | Reduce RuleId
+    | ReduceAndGoTo RuleId StateId
     | GoTo StateId
+    | FinalAccept
 
 
 actionToString : Action -> String
 actionToString action =
     case action of
-        ShiftReduce (ShiftAndEnter state) ->
+        Shift state ->
             "shift and enter state " ++ stateToString state
 
-        ShiftReduce (ReduceUsingRule rule) ->
-            "reduce using rule " ++ ruleToString rule
+        Reduce rule ->
+            "reduce using rule " ++ ruleIdToString rule
 
-        ShiftReduce Accept ->
-            "accept"
+        ReduceAndGoTo rule state ->
+            "reduce using rule " ++ ruleIdToString rule ++ " and go to state " ++ stateToString state
 
         GoTo state ->
             "go to state " ++ stateToString state
 
+        FinalAccept ->
+            "accept"
+
 
 type alias Model =
     { grammar : String
+    , parseEnabled : Bool
     , maybeError : Maybe String
     , currentRow : Row
     , table : List Row
     , actions : List Action
-    , automaton : Automaton
+    , automaton : Maybe Automaton
     }
 
 
@@ -434,15 +446,15 @@ update : Msg -> Model -> Model
 update msg model =
     case msg of
         ChangeGrammar newInput ->
-            { model | grammar = newInput, maybeError = Nothing }
+            { model | grammar = newInput, parseEnabled = True, maybeError = Nothing }
 
         Parse ->
             case Parser.run parserInfo model.grammar of
                 Err deadEnds ->
-                    { model | maybeError = Just (Debug.toString deadEnds) }
+                    { model | parseEnabled = False, maybeError = Just (Debug.toString deadEnds) }
 
                 Ok automaton ->
-                    { model | automaton = automaton, maybeError = Nothing }
+                    { model | parseEnabled = False, automaton = Just automaton, maybeError = Nothing }
 
         Step ->
             case model.maybeError of
@@ -450,12 +462,12 @@ update msg model =
                     model
 
                 Nothing ->
-                    case model.currentRow.unscanned of
-                        [] ->
-                            Debug.todo "Implement error handling"
+                    case model.automaton of
+                        Nothing ->
+                            { model | maybeError = Just "Performed step with no automaton" }
 
-                        token :: _ ->
-                            case step token model.currentRow model.automaton of
+                        Just automaton ->
+                            case step (Maybe.map .state (List.head model.table)) model.currentRow automaton of
                                 Ok ( newRow, action ) ->
                                     { model
                                         | currentRow = newRow
@@ -467,46 +479,93 @@ update msg model =
                                     { model | maybeError = Just message }
 
 
-step : String -> Row -> Automaton -> Result String ( Row, Action )
-step token row automaton =
-    case row.state of
+step : Maybe StateId -> Row -> Automaton -> Result String ( Row, Action )
+step maybePreviousStateId currentRow automaton =
+    case currentRow.state of
         StateId stateId ->
             case Dict.get stateId automaton.states of
                 Nothing ->
                     Err ("State " ++ String.fromInt stateId ++ " not found")
 
                 Just state ->
-                    case Dict.get token state.lookaheads of
+                    performLookahead maybePreviousStateId automaton.grammar currentRow state
+
+
+performLookahead : Maybe StateId -> Dict Int Production -> Row -> State -> Result String ( Row, Action )
+performLookahead maybePreviousStateId grammar currentRow state =
+    case currentRow.unscanned of
+        [] ->
+            Err "Performed step but there are no unscanned tokens"
+
+        token :: _ ->
+            case Dict.get token state.lookaheads of
+                Nothing ->
+                    case Stack.pop currentRow.stack of
                         Nothing ->
-                            Debug.todo "Implement this case"
+                            Err "Checked lookahead symbol but the stack is empty"
 
-                        Just ( (ShiftAndEnter nextStateId) as action, _ ) ->
-                            Ok
-                                ( { state = nextStateId
-                                  , stack = Stack.push token row.stack
-                                  , lookAhead = ""
-                                  , unscanned = List.drop 1 row.unscanned
-                                  }
-                                , ShiftReduce action
-                                )
-
-                        Just ( (ReduceUsingRule (RuleId ruleId)) as action, _ ) ->
-                            case Dict.get ruleId automaton.grammar of
+                        Just ( head, _ ) ->
+                            case Dict.get head state.gotos of
                                 Nothing ->
-                                    Err ("Rule " ++ String.fromInt ruleId ++ " not found")
+                                    Err "There is neither a lookahead nor a goto defined in this state"
 
-                                Just rule ->
+                                Just newStateId ->
                                     Ok
-                                        ( { state = row.state
-                                          , stack = applyProduction rule row.stack
-                                          , lookAhead = ""
-                                          , unscanned = row.unscanned
-                                          }
-                                        , ShiftReduce action
+                                        ( { currentRow | state = newStateId }
+                                        , GoTo newStateId
                                         )
 
-                        Just ( Accept, _ ) ->
-                            Ok ( row, ShiftReduce Accept )
+                Just ( ShiftAndEnter nextStateId, _ ) ->
+                    Ok
+                        ( { state = nextStateId
+                          , stack = Stack.push token currentRow.stack
+                          , lookAhead = ""
+                          , unscanned = List.drop 1 currentRow.unscanned
+                          }
+                        , Shift nextStateId
+                        )
+
+                Just ( ReduceUsingRule ruleId, _ ) ->
+                    case Dict.get (ruleIdToInt ruleId) grammar of
+                        Nothing ->
+                            Err ("Rule " ++ ruleIdToString ruleId ++ " not found")
+
+                        Just rule ->
+                            let
+                                newStack =
+                                    applyProduction rule currentRow.stack
+                            in
+                            case Stack.pop newStack of
+                                Nothing ->
+                                    Err "Applying a rule did not produce an element on the stack"
+
+                                Just ( head, _ ) ->
+                                    case Dict.get head state.gotos of
+                                        Nothing ->
+                                            case maybePreviousStateId of
+                                                Nothing ->
+                                                    Err "There is no previous state but no goto is defined either"
+
+                                                Just previousStateId ->
+                                                    Ok
+                                                        ( { currentRow
+                                                            | state = previousStateId
+                                                            , stack = newStack
+                                                          }
+                                                        , Reduce ruleId
+                                                        )
+
+                                        Just newStateId ->
+                                            Ok
+                                                ( { currentRow
+                                                    | state = newStateId
+                                                    , stack = newStack
+                                                  }
+                                                , ReduceAndGoTo ruleId newStateId
+                                                )
+
+                Just ( Accept, _ ) ->
+                    Ok ( currentRow, FinalAccept )
 
 
 applyProduction : Production -> Stack -> Stack
@@ -532,8 +591,8 @@ view model =
             , onInput ChangeGrammar
             ]
             []
-        , button [ onClick Parse ] [ text "Parse grammar" ]
-        , button [ onClick Step ] [ text "Perform step" ]
+        , button [ onClick Parse, disabled (not model.parseEnabled) ] [ text "Parse automaton" ]
+        , button [ onClick Step, disabled (model.automaton == Nothing) ] [ text "Perform step" ]
         , case model.maybeError of
             Nothing ->
                 text ""
@@ -541,7 +600,8 @@ view model =
             Just message ->
                 text message
         , viewTable (model.currentRow :: model.table) (Nothing :: List.map Just model.actions)
-        , text (Debug.toString model.automaton)
+
+        -- , text (Debug.toString model.automaton)
         ]
 
 
@@ -596,11 +656,9 @@ main =
                         }
                   , table = []
                   , actions = []
-                  , automaton =
-                        { grammar = Dict.empty
-                        , states = Dict.empty
-                        }
+                  , automaton = Nothing
                   , grammar = ""
+                  , parseEnabled = False
                   }
                 , Cmd.none
                 )
