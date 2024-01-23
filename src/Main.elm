@@ -5,6 +5,7 @@ import Dict exposing (Dict)
 import Html exposing (Html, button, div, table, td, text, textarea, th, tr)
 import Html.Attributes exposing (cols, disabled, list, placeholder, rows)
 import Html.Events exposing (onClick, onInput)
+import List exposing (head)
 import Parser exposing ((|.), (|=), Parser, Step(..), Trailing(..))
 import Set
 import Stack exposing (Stack)
@@ -632,54 +633,71 @@ performLookahead maybePreviousStateId grammar currentRow state =
                             Err ("Rule " ++ ruleIdToString ruleId ++ " not found")
 
                         Just rule ->
-                            let
-                                newStack =
-                                    applyProduction rule currentRow.stack
-                            in
-                            case Stack.pop newStack of
-                                Nothing ->
-                                    Err "Applying a rule did not produce an element on the stack"
+                            case applyProduction rule currentRow.stack of
+                                Err message ->
+                                    Err message
 
-                                Just ( head, _ ) ->
-                                    case Dict.get head state.gotos of
+                                Ok newStack ->
+                                    case Stack.pop newStack of
                                         Nothing ->
-                                            case maybePreviousStateId of
-                                                Nothing ->
-                                                    Err "There is no previous state but no goto is defined either"
+                                            Err "Applying a rule did not produce an element on the stack"
 
-                                                Just previousStateId ->
+                                        Just ( head, _ ) ->
+                                            case Dict.get head state.gotos of
+                                                Nothing ->
+                                                    case maybePreviousStateId of
+                                                        Nothing ->
+                                                            Err "There is no previous state but no goto is defined either"
+
+                                                        Just previousStateId ->
+                                                            Ok
+                                                                ( { currentRow
+                                                                    | state = previousStateId
+                                                                    , stack = newStack
+                                                                  }
+                                                                , Reduce ruleId
+                                                                )
+
+                                                Just newStateId ->
                                                     Ok
                                                         ( { currentRow
-                                                            | state = previousStateId
+                                                            | state = newStateId
                                                             , stack = newStack
                                                           }
-                                                        , Reduce ruleId
+                                                        , ReduceAndGoTo ruleId newStateId
                                                         )
-
-                                        Just newStateId ->
-                                            Ok
-                                                ( { currentRow
-                                                    | state = newStateId
-                                                    , stack = newStack
-                                                  }
-                                                , ReduceAndGoTo ruleId newStateId
-                                                )
 
                 Just ( Accept, _ ) ->
                     Ok ( currentRow, FinalAccept )
 
 
-applyProduction : Production -> Stack -> Stack
+applyProduction : Production -> Stack -> Result String Stack
 applyProduction (Production pre posts) stack =
-    let
-        postsSize =
-            List.length posts
-    in
-    if Stack.size stack >= postsSize then
-        Stack.push pre (Stack.popN postsSize stack)
+    case match posts stack of
+        Ok newStack ->
+            Ok (Stack.push pre newStack)
 
-    else
-        Debug.todo "Handle this error"
+        (Err _) as res ->
+            res
+
+
+match : List String -> Stack -> Result String Stack
+match input stack =
+    case input of
+        [] ->
+            Ok stack
+
+        str :: strs ->
+            case Stack.pop stack of
+                Nothing ->
+                    Err "Stack is empty"
+
+                Just ( head, newStack ) ->
+                    if str == head then
+                        match strs newStack
+
+                    else
+                        Err "Head of stack does not match head of list"
 
 
 view : Model -> Html Msg
@@ -753,6 +771,7 @@ main =
                             , "L_LIDENT"
                             , "L_LIDENT"
                             , ")"
+                            , "%eof"
                             ]
                         }
                   , table = []
