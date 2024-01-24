@@ -11,6 +11,10 @@ import Set
 import Stack exposing (Stack)
 
 
+
+-- import Automaton
+
+
 type Msg
     = Step
     | ChangeGrammar String
@@ -21,8 +25,13 @@ type StateId
     = StateId Int
 
 
-stateToString : StateId -> String
-stateToString (StateId no) =
+stateIdToInt : StateId -> Int
+stateIdToInt (StateId no) =
+    no
+
+
+stateIdToString : StateId -> String
+stateIdToString (StateId no) =
     String.fromInt no
 
 
@@ -47,54 +56,47 @@ type ShiftReduceAction
 
 
 type Action
-    = Shift StateId
-    | Reduce RuleId
-    | ReduceAndGoTo RuleId StateId
+    = ShiftReduce ShiftReduceAction
     | GoTo StateId
-    | FinalAccept
 
 
 actionToString : Action -> String
 actionToString action =
     case action of
-        Shift state ->
-            "shift and enter state " ++ stateToString state
+        ShiftReduce (ShiftAndEnter state) ->
+            "shift and enter state " ++ stateIdToString state
 
-        Reduce rule ->
+        ShiftReduce (ReduceUsingRule rule) ->
             "reduce using rule " ++ ruleIdToString rule
 
-        ReduceAndGoTo rule state ->
-            "reduce using rule " ++ ruleIdToString rule ++ " and go to state " ++ stateToString state
+        ShiftReduce Accept ->
+            "accept"
 
         GoTo state ->
-            "go to state " ++ stateToString state
-
-        FinalAccept ->
-            "accept"
+            "go to state " ++ stateIdToString state
 
 
 type alias Model =
     { grammar : String
     , parseEnabled : Bool
     , maybeError : Maybe String
-    , currentRow : Row
-    , table : List Row
+    , parserState : ParserState
+    , history : List ParserState
     , actions : List Action
     , automaton : Maybe Automaton
+    }
+
+
+type alias ParserState =
+    { valueStack : Stack String
+    , controlStack : Stack StateId
+    , unscanned : List String
     }
 
 
 type alias Automaton =
     { grammar : Dict Int Production
     , states : Dict Int State
-    }
-
-
-type alias Row =
-    { state : StateId
-    , stack : Stack
-    , lookAhead : String
-    , unscanned : List String
     }
 
 
@@ -373,6 +375,17 @@ parserNonTerminals =
 
 parserStates : Parser (Dict Int State)
 parserStates =
+    let
+        parserState =
+            Parser.succeed (\stateId lookaheads gotos -> ( stateId, State (StateId stateId) lookaheads gotos ))
+                |. Parser.keyword "State"
+                |. Parser.spaces
+                |= Parser.int
+                |. Parser.spaces
+                |. parserDict (parserProduction Rule)
+                |= parserDict parserLookahead
+                |= parserDict parserGoto
+    in
     Parser.succeed identity
         |. parserHeader "States"
         |= Parser.map Dict.fromList
@@ -385,18 +398,6 @@ parserStates =
                 , trailing = Forbidden
                 }
             )
-
-
-parserState : Parser ( Int, State )
-parserState =
-    Parser.succeed (\stateId lookaheads gotos -> ( stateId, State (StateId stateId) lookaheads gotos ))
-        |. Parser.keyword "State"
-        |. Parser.spaces
-        |= Parser.int
-        |. Parser.spaces
-        |. parserDict (parserProduction Rule)
-        |= parserDict parserLookahead
-        |= parserDict parserGoto
 
 
 parserLookahead : Parser ( String, ( ShiftReduceAction, List ShiftReduceAction ) )
@@ -569,11 +570,11 @@ update msg model =
                             { model | maybeError = Just "Performed step with no automaton" }
 
                         Just automaton ->
-                            case step (Maybe.map .state (List.head model.table)) model.currentRow automaton of
-                                Ok ( newRow, action ) ->
+                            case step automaton model.parserState of
+                                Ok ( newParserState, action ) ->
                                     { model
-                                        | currentRow = newRow
-                                        , table = model.currentRow :: model.table
+                                        | parserState = newParserState
+                                        , history = model.parserState :: model.history
                                         , actions = action :: model.actions
                                     }
 
@@ -581,123 +582,117 @@ update msg model =
                                     { model | maybeError = Just message }
 
 
-step : Maybe StateId -> Row -> Automaton -> Result String ( Row, Action )
-step maybePreviousStateId currentRow automaton =
-    case currentRow.state of
-        StateId stateId ->
-            case Dict.get stateId automaton.states of
-                Nothing ->
-                    Err ("State " ++ String.fromInt stateId ++ " not found")
-
-                Just state ->
-                    performLookahead maybePreviousStateId automaton.grammar currentRow state
-
-
-performLookahead : Maybe StateId -> Dict Int Production -> Row -> State -> Result String ( Row, Action )
-performLookahead maybePreviousStateId grammar currentRow state =
-    case currentRow.unscanned of
+step : Automaton -> ParserState -> Result String ( ParserState, Action )
+step automaton parserState =
+    case parserState.unscanned of
         [] ->
             Err "Performed step but there are no unscanned tokens"
 
         token :: _ ->
-            case Dict.get token state.lookaheads of
+            case Stack.pop parserState.controlStack of
                 Nothing ->
-                    case Stack.pop currentRow.stack of
-                        Nothing ->
-                            Err "Checked lookahead symbol but the stack is empty"
+                    Err "Action stack is empty"
 
-                        Just ( head, _ ) ->
-                            case Dict.get head state.gotos of
+                Just ( currentStateId, _ ) ->
+                    case Dict.get (stateIdToInt currentStateId) automaton.states of
+                        Nothing ->
+                            Err ("State " ++ String.fromInt (stateIdToInt currentStateId) ++ " not found")
+
+                        Just state ->
+                            performAction automaton state token parserState
+
+
+performAction : Automaton -> State -> String -> ParserState -> Result String ( ParserState, Action )
+performAction automaton state token currentParserState =
+    case Dict.get token state.lookaheads of
+        Nothing ->
+            Err ("No lookahead found for token " ++ token)
+
+        Just ( (ShiftAndEnter nextStateId) as action, _ ) ->
+            Ok
+                ( { currentParserState
+                    | valueStack = Stack.push token currentParserState.valueStack
+                    , controlStack = Stack.push nextStateId currentParserState.controlStack
+                    , unscanned = List.drop 1 currentParserState.unscanned
+                  }
+                , ShiftReduce action
+                )
+
+        Just ( (ReduceUsingRule ruleId) as action, _ ) ->
+            case Dict.get (ruleIdToInt ruleId) automaton.grammar of
+                Nothing ->
+                    Err ("Rule " ++ ruleIdToString ruleId ++ " not found")
+
+                Just rule ->
+                    case applyProduction automaton.states rule currentParserState.valueStack currentParserState.controlStack of
+                        Err message ->
+                            Err message
+
+                        Ok ( newValueStack, newControlStack ) ->
+                            Ok
+                                ( { currentParserState
+                                    | valueStack = newValueStack
+                                    , controlStack = newControlStack
+                                  }
+                                , ShiftReduce action
+                                )
+
+        Just ( Accept, _ ) ->
+            Err "The input has been accepted"
+
+
+applyProduction : Dict Int State -> Production -> Stack String -> Stack StateId -> Result String ( Stack String, Stack StateId )
+applyProduction states (Production pre posts) valueStack controlStack =
+    case match (List.reverse posts) valueStack of
+        Nothing ->
+            let
+                noOfPosts =
+                    List.length posts
+
+                poppedControlStack =
+                    Stack.popN noOfPosts controlStack
+            in
+            case Stack.peek poppedControlStack of
+                Nothing ->
+                    Err "Control stack does not have a state for the goto table"
+
+                Just stateId ->
+                    case Dict.get (stateIdToInt stateId) states of
+                        Nothing ->
+                            Err ("State " ++ stateIdToString stateId ++ " not available")
+
+                        Just state ->
+                            case Dict.get pre state.gotos of
                                 Nothing ->
-                                    Err "There is neither a lookahead nor a goto defined in this state"
+                                    Err ("Goto table does not have an entry for " ++ pre)
 
                                 Just newStateId ->
                                     Ok
-                                        ( { currentRow | state = newStateId }
-                                        , GoTo newStateId
+                                        ( Stack.push pre (Stack.popN noOfPosts valueStack)
+                                        , Stack.push newStateId poppedControlStack
                                         )
 
-                Just ( ShiftAndEnter nextStateId, _ ) ->
-                    Ok
-                        ( { state = nextStateId
-                          , stack = Stack.push token currentRow.stack
-                          , lookAhead = ""
-                          , unscanned = List.drop 1 currentRow.unscanned
-                          }
-                        , Shift nextStateId
-                        )
-
-                Just ( ReduceUsingRule ruleId, _ ) ->
-                    case Dict.get (ruleIdToInt ruleId) grammar of
-                        Nothing ->
-                            Err ("Rule " ++ ruleIdToString ruleId ++ " not found")
-
-                        Just rule ->
-                            case applyProduction rule currentRow.stack of
-                                Err message ->
-                                    Err message
-
-                                Ok newStack ->
-                                    case Stack.pop newStack of
-                                        Nothing ->
-                                            Err "Applying a rule did not produce an element on the stack"
-
-                                        Just ( head, _ ) ->
-                                            case Dict.get head state.gotos of
-                                                Nothing ->
-                                                    case maybePreviousStateId of
-                                                        Nothing ->
-                                                            Err "There is no previous state but no goto is defined either"
-
-                                                        Just previousStateId ->
-                                                            Ok
-                                                                ( { currentRow
-                                                                    | state = previousStateId
-                                                                    , stack = newStack
-                                                                  }
-                                                                , Reduce ruleId
-                                                                )
-
-                                                Just newStateId ->
-                                                    Ok
-                                                        ( { currentRow
-                                                            | state = newStateId
-                                                            , stack = newStack
-                                                          }
-                                                        , ReduceAndGoTo ruleId newStateId
-                                                        )
-
-                Just ( Accept, _ ) ->
-                    Ok ( currentRow, FinalAccept )
+        Just message ->
+            Err message
 
 
-applyProduction : Production -> Stack -> Result String Stack
-applyProduction (Production pre posts) stack =
-    case match posts stack of
-        Ok newStack ->
-            Ok (Stack.push pre newStack)
-
-        (Err _) as res ->
-            res
-
-
-match : List String -> Stack -> Result String Stack
-match input stack =
+match : List String -> Stack String -> Maybe String
+match input valueStack =
     case input of
         [] ->
-            Ok stack
+            Nothing
 
         str :: strs ->
-            case Stack.pop stack of
+            case Stack.pop valueStack of
                 Nothing ->
-                    Err "Stack is empty"
+                    Just "Stack is empty"
 
                 Just ( head, newStack ) ->
                     if str == head then
                         match strs newStack
 
                     else
-                        Err "Head of stack does not match head of list"
+                        Just "Head of stack does not match head of list"
 
 
 view : Model -> Html Msg
@@ -718,13 +713,13 @@ view model =
 
             Just message ->
                 text message
-        , viewTable (model.currentRow :: model.table) (Nothing :: List.map Just model.actions)
+        , viewTable (model.parserState :: model.history) (Nothing :: List.map Just model.actions)
 
         -- , text (Debug.toString model.automaton)
         ]
 
 
-viewTable : List Row -> List (Maybe Action) -> Html Msg
+viewTable : List ParserState -> List (Maybe Action) -> Html Msg
 viewTable rows actions =
     table [] (tableHeader :: List.map2 viewRow (List.reverse rows) (List.reverse actions))
 
@@ -732,21 +727,19 @@ viewTable rows actions =
 tableHeader : Html Msg
 tableHeader =
     tr []
-        [ th [] [ text "State" ]
-        , th [] [ text "Parse Stack" ]
-        , th [] [ text "Look Ahead" ]
+        [ th [] [ text "Parse Stack" ]
+        , th [] [ text "Control Stack" ]
         , th [] [ text "Unscanned" ]
         , th [] [ text "Parser Action" ]
         ]
 
 
-viewRow : Row -> Maybe Action -> Html Msg
-viewRow row maybeAction =
+viewRow : ParserState -> Maybe Action -> Html Msg
+viewRow parserState maybeAction =
     tr []
-        [ td [] [ text (stateToString row.state) ]
-        , td [] [ text (Stack.toString row.stack) ]
-        , td [] [ text row.lookAhead ]
-        , td [] [ text (String.join " " row.unscanned) ]
+        [ td [] [ text (Stack.toString identity parserState.valueStack) ]
+        , td [] [ text (Stack.toString stateIdToString parserState.controlStack) ]
+        , td [] [ text (String.join " " parserState.unscanned) ]
         , td [] [ text (Maybe.withDefault "" (Maybe.map actionToString maybeAction)) ]
         ]
 
@@ -757,10 +750,9 @@ main =
         { init =
             \_ ->
                 ( { maybeError = Nothing
-                  , currentRow =
-                        { state = StateId 0
-                        , stack = Stack.empty
-                        , lookAhead = ""
+                  , parserState =
+                        { valueStack = Stack.empty
+                        , controlStack = Stack.push (StateId 0) Stack.empty
                         , unscanned =
                             [ "let"
                             , "L_LIDENT"
@@ -774,8 +766,10 @@ main =
                             , "%eof"
                             ]
                         }
-                  , table = []
+                  , history = []
                   , actions = []
+
+                  --   , automaton = Just Automaton.o
                   , automaton = Nothing
                   , grammar = ""
                   , parseEnabled = False

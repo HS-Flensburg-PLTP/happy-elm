@@ -1,41 +1,51 @@
-module Stack exposing (Stack, empty, isEmpty, pop, popN, push, size, toString)
+module Stack exposing
+    ( Stack
+    , empty
+    , isEmpty
+    , peek
+    , pop
+    , popN
+    , push
+    , size
+    , toString
+    )
 
 
-type Stack
-    = Stack (List String)
+type Stack a
+    = Stack (List a)
 
 
-toString : Stack -> String
-toString (Stack entries) =
+toString : (a -> String) -> Stack a -> String
+toString aToString (Stack entries) =
     case entries of
         [] ->
             "<empty>"
 
         _ ->
-            String.join " " (List.reverse entries)
+            String.join " " (List.reverse (List.map aToString entries))
 
 
-empty : Stack
+empty : Stack a
 empty =
     Stack []
 
 
-isEmpty : Stack -> Bool
+isEmpty : Stack a -> Bool
 isEmpty (Stack list) =
     List.isEmpty list
 
 
-size : Stack -> Int
+size : Stack a -> Int
 size (Stack list) =
     List.length list
 
 
-popN : Int -> Stack -> Stack
+popN : Int -> Stack a -> Stack a
 popN n (Stack list) =
     Stack (List.drop n list)
 
 
-pop : Stack -> Maybe ( String, Stack )
+pop : Stack a -> Maybe ( a, Stack a )
 pop (Stack list) =
     case list of
         [] ->
@@ -45,6 +55,16 @@ pop (Stack list) =
             Just ( str, Stack rest )
 
 
-push : String -> Stack -> Stack
+push : a -> Stack a -> Stack a
 push entry (Stack list) =
     Stack (entry :: list)
+
+
+peek : Stack a -> Maybe a
+peek (Stack list) =
+    case list of
+        [] ->
+            Nothing
+
+        head :: _ ->
+            Just head
