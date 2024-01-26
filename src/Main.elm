@@ -9,6 +9,7 @@ import List exposing (head)
 import Parser exposing ((|.), (|=), Parser, Step(..), Trailing(..))
 import Set
 import Stack exposing (Stack)
+import String.Extra as String
 
 
 
@@ -17,8 +18,9 @@ import Stack exposing (Stack)
 
 type Msg
     = Step
+    | ParseInput
     | ChangeGrammar String
-    | Parse
+    | ParseInfo
 
 
 type StateId
@@ -55,21 +57,30 @@ type ShiftReduceAction
     | Accept
 
 
-type Action
-    = ShiftReduce ShiftReduceAction
+type PerformedAction
+    = ShiftReduce ShiftReduceAction (List ShiftReduceAction)
     | GoTo StateId
 
 
-actionToString : Action -> String
+actionToString : PerformedAction -> String
 actionToString action =
+    let
+        showConflicts conflicts =
+            case conflicts of
+                [] ->
+                    ""
+
+                _ ->
+                    "(" ++ String.pluralize "conflict" "conflicts" (List.length conflicts) ++ ")"
+    in
     case action of
-        ShiftReduce (ShiftAndEnter state) ->
-            "shift and enter state " ++ stateIdToString state
+        ShiftReduce (ShiftAndEnter state) conflicts ->
+            "shift and enter state " ++ stateIdToString state ++ " " ++ showConflicts conflicts
 
-        ShiftReduce (ReduceUsingRule rule) ->
-            "reduce using rule " ++ ruleIdToString rule
+        ShiftReduce (ReduceUsingRule rule) conflicts ->
+            "reduce using rule " ++ ruleIdToString rule ++ " " ++ showConflicts conflicts
 
-        ShiftReduce Accept ->
+        ShiftReduce Accept _ ->
             "accept"
 
         GoTo state ->
@@ -82,7 +93,7 @@ type alias Model =
     , maybeError : Maybe String
     , parserState : ParserState
     , history : List ParserState
-    , actions : List Action
+    , actions : List PerformedAction
     , automaton : Maybe Automaton
     }
 
@@ -102,8 +113,14 @@ type alias Automaton =
 
 type alias State =
     { stateId : StateId
-    , lookaheads : Dict String ( ShiftReduceAction, List ShiftReduceAction )
+    , lookaheads : Dict String Action
     , gotos : Dict String StateId
+    }
+
+
+type alias Action =
+    { action : ShiftReduceAction
+    , conflicts : List ShiftReduceAction
     }
 
 
@@ -400,9 +417,9 @@ parserStates =
             )
 
 
-parserLookahead : Parser ( String, ( ShiftReduceAction, List ShiftReduceAction ) )
+parserLookahead : Parser ( String, Action )
 parserLookahead =
-    Parser.succeed (\( name, action ) conflicts -> ( name, ( action, conflicts ) ))
+    Parser.succeed (\( name, action ) conflicts -> ( name, Action action conflicts ))
         |. Parser.symbol "\t"
         |= (parserTerminal
                 |> Parser.andThen
@@ -551,7 +568,7 @@ update msg model =
         ChangeGrammar newInput ->
             { model | grammar = newInput, parseEnabled = True, maybeError = Nothing }
 
-        Parse ->
+        ParseInfo ->
             case Parser.run parserInfo model.grammar of
                 Err deadEnds ->
                     { model | parseEnabled = False, maybeError = Just (Debug.toString deadEnds) }
@@ -581,8 +598,50 @@ update msg model =
                                 Err message ->
                                     { model | maybeError = Just message }
 
+        ParseInput ->
+            case model.maybeError of
+                Just _ ->
+                    model
 
-step : Automaton -> ParserState -> Result String ( ParserState, Action )
+                Nothing ->
+                    case model.automaton of
+                        Nothing ->
+                            { model | maybeError = Just "Performed step with no automaton" }
+
+                        Just automaton ->
+                            let
+                                { finalState, history, actions, maybeError } =
+                                    parseInput automaton model.parserState [] []
+                            in
+                            { model
+                                | parserState = finalState
+                                , history = history
+                                , actions = actions
+                                , maybeError = maybeError
+                            }
+
+
+parseInput :
+    Automaton
+    -> ParserState
+    -> List ParserState
+    -> List PerformedAction
+    ->
+        { finalState : ParserState
+        , history : List ParserState
+        , actions : List PerformedAction
+        , maybeError : Maybe String
+        }
+parseInput automaton state states actions =
+    case step automaton state of
+        Err message ->
+            { finalState = state, history = states, actions = actions, maybeError = Just message }
+
+        Ok ( newState, newAction ) ->
+            parseInput automaton newState (state :: states) (newAction :: actions)
+
+
+step : Automaton -> ParserState -> Result String ( ParserState, PerformedAction )
 step automaton parserState =
     case parserState.unscanned of
         [] ->
@@ -602,43 +661,45 @@ step automaton parserState =
                             performAction automaton state token parserState
 
 
-performAction : Automaton -> State -> String -> ParserState -> Result String ( ParserState, Action )
+performAction : Automaton -> State -> String -> ParserState -> Result String ( ParserState, PerformedAction )
 performAction automaton state token currentParserState =
     case Dict.get token state.lookaheads of
         Nothing ->
             Err ("No lookahead found for token " ++ token)
 
-        Just ( (ShiftAndEnter nextStateId) as action, _ ) ->
-            Ok
-                ( { currentParserState
-                    | valueStack = Stack.push token currentParserState.valueStack
-                    , controlStack = Stack.push nextStateId currentParserState.controlStack
-                    , unscanned = List.drop 1 currentParserState.unscanned
-                  }
-                , ShiftReduce action
-                )
+        Just { action, conflicts } ->
+            case action of
+                ShiftAndEnter nextStateId ->
+                    Ok
+                        ( { currentParserState
+                            | valueStack = Stack.push token currentParserState.valueStack
+                            , controlStack = Stack.push nextStateId currentParserState.controlStack
+                            , unscanned = List.drop 1 currentParserState.unscanned
+                          }
+                        , ShiftReduce action conflicts
+                        )
 
-        Just ( (ReduceUsingRule ruleId) as action, _ ) ->
-            case Dict.get (ruleIdToInt ruleId) automaton.grammar of
-                Nothing ->
-                    Err ("Rule " ++ ruleIdToString ruleId ++ " not found")
+                ReduceUsingRule ruleId ->
+                    case Dict.get (ruleIdToInt ruleId) automaton.grammar of
+                        Nothing ->
+                            Err ("Rule " ++ ruleIdToString ruleId ++ " not found")
 
-                Just rule ->
-                    case applyProduction automaton.states rule currentParserState.valueStack currentParserState.controlStack of
-                        Err message ->
-                            Err message
+                        Just rule ->
+                            case applyProduction automaton.states rule currentParserState.valueStack currentParserState.controlStack of
+                                Err message ->
+                                    Err message
 
-                        Ok ( newValueStack, newControlStack ) ->
-                            Ok
-                                ( { currentParserState
-                                    | valueStack = newValueStack
-                                    , controlStack = newControlStack
-                                  }
-                                , ShiftReduce action
-                                )
+                                Ok ( newValueStack, newControlStack ) ->
+                                    Ok
+                                        ( { currentParserState
+                                            | valueStack = newValueStack
+                                            , controlStack = newControlStack
+                                          }
+                                        , ShiftReduce action conflicts
+                                        )
 
-        Just ( Accept, _ ) ->
-            Err "The input has been accepted"
+                Accept ->
+                    Err "The input has been accepted"
 
 
 applyProduction : Dict Int State -> Production -> Stack String -> Stack StateId -> Result String ( Stack String, Stack StateId )
@@ -705,8 +766,9 @@ view model =
             , onInput ChangeGrammar
             ]
             []
-        , button [ onClick Parse, disabled (not model.parseEnabled) ] [ text "Parse automaton" ]
+        , button [ onClick ParseInfo, disabled (not model.parseEnabled) ] [ text "Parse automaton" ]
         , button [ onClick Step, disabled (model.automaton == Nothing) ] [ text "Perform step" ]
+        , button [ onClick ParseInput, disabled (model.automaton == Nothing) ] [ text "Parse input" ]
         , case model.maybeError of
             Nothing ->
                 text ""
@@ -719,7 +781,7 @@ view model =
         ]
 
 
-viewTable : List ParserState -> List (Maybe Action) -> Html Msg
+viewTable : List ParserState -> List (Maybe PerformedAction) -> Html Msg
 viewTable rows actions =
     table [] (tableHeader :: List.map2 viewRow (List.reverse rows) (List.reverse actions))
 
@@ -734,7 +796,7 @@ tableHeader =
         ]
 
 
-viewRow : ParserState -> Maybe Action -> Html Msg
+viewRow : ParserState -> Maybe PerformedAction -> Html Msg
 viewRow parserState maybeAction =
     tr []
         [ td [] [ text (Stack.toString identity parserState.valueStack) ]
