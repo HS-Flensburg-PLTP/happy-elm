@@ -163,7 +163,7 @@ parserNonTerminal : Parser String
 parserNonTerminal =
     Parser.variable
         { start = \c -> Char.isUpper c || c == '%'
-        , inner = \c -> Char.isLower c || Char.isUpper c || c == '_'
+        , inner = \c -> Char.isAlphaNum c || c == '_'
         , reserved = Set.empty
         }
 
@@ -177,11 +177,9 @@ parserTerminal =
                 , inner = \c -> c /= ' '
                 , reserved = Set.empty
                 }
-        , Parser.variable
-            { start = \c -> c == 'L'
-            , inner = \c -> Char.isLower c || Char.isUpper c || c == '_'
-            , reserved = Set.empty
-            }
+        , Parser.succeed (String.append "L_")
+            |. Parser.token "L_"
+            |= Parser.getChompedString (Parser.chompWhile (\c -> Char.isAlphaNum c || c == '_'))
         , Parser.succeed (\_ -> "%eof")
             |= Parser.keyword "%eof"
         , Parser.succeed (\_ -> "'")
